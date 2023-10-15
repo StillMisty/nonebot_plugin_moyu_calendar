@@ -1,12 +1,12 @@
 
-import re
+from re import I
 from pathlib import Path
 
 from typing import Any, Annotated
 
 import httpx
 from nonebot import get_bot, get_driver, logger, on_regex, require
-from nonebot.adapters.onebot.v11 import GroupMessageEvent, MessageSegment
+from nonebot.adapters.onebot.v11 import GroupMessageEvent, MessageSegment, Event
 from nonebot.matcher import Matcher
 from nonebot.params import RegexGroup
 from nonebot.plugin import PluginMetadata
@@ -21,7 +21,7 @@ require("nonebot_plugin_apscheduler")
 from nonebot_plugin_apscheduler import scheduler
 
 __usages__ = f'''
-[摸鱼] 获取今日摸鱼日历
+[摸鱼帮助]
 '''.strip()
 
 __plugin_meta__ = PluginMetadata(
@@ -95,64 +95,73 @@ def calendar_subscribe(group_id: str, hour: str, minute: str) -> None:
     )
     logger.debug(f"群[{group_id}]设置摸鱼日历推送时间为：{hour}:{minute}")
 
+async def is_group(event: Event) -> bool:
+    '''判断是否为群聊'''
+    return event.get_type == "group"
 
-moyu_matcher = on_regex("^摸鱼\s*(状态|设置|推送|禁用|关闭|帮助)?\s*(([01]?\d|2[0-3])[:：]([0-5]?\d)|all|ALL)?$",flags=re.I, priority=5, block=True)
 
+moyu = on_regex("^摸鱼$", flags=I, priority=5, block=True)
 
-@moyu_matcher.handle()
-async def moyu(
+moyu_state = on_regex("^摸鱼\s*状态\s*$",flags=I, priority=5, block=True, rule=is_group)
+
+moyu_setting = on_regex("^摸鱼\s*(设置|推送)\s*([01]?\d|2[0-3])[:：.]([0-5]?\d)$", flags=I, priority=5, block=True, rule=is_group)
+
+moyu_disable = on_regex("^摸鱼\s*(禁用|关闭)\s*(all|ALL)?$", flags=I, priority=5, block=True, rule=is_group)
+
+moyu_help = on_regex("^摸鱼\s*帮助\s*$", flags=I, priority=5, block=True)
+
+@moyu.handle()
+async def moyu(matcher: Matcher):
+    # 只有摸鱼
+    try:
+        moyu_img = await get_calendar()
+    except Exception as e:
+        logger.error(e)
+        await moyu.finish(e)
+    await matcher.finish(MessageSegment.image(moyu_img))
+
+@moyu_state.handle()
+async def moyu_state(
+    event: GroupMessageEvent,
+    matcher: Matcher
+):
+    push_state = scheduler.get_job(f"moyu_calendar_{event.group_id}")
+    moyu_state = "摸鱼日历状态：\n每日推送: " + ("已开启" if push_state else "已关闭")
+    if push_state:
+        group_id_info = subscribe_list[str(event.group_id)]
+        moyu_state += (
+            f"\n推送时间: {group_id_info['hour']}:{group_id_info['minute']}"
+        )
+    await matcher.finish(moyu_state)
+
+@moyu_setting.handle()
+async def moyu_setting(
     event: GroupMessageEvent, matcher: Matcher, args: Annotated[tuple[Any, ...], RegexGroup()]
 ):
-    # 获取摸鱼参数
-    parameter = args[0]
+    calendar_subscribe(str(event.group_id), args[1], args[2])
+    await matcher.finish(f"本群摸鱼日历推送时间设置成功：{args[2]}:{args[3]}")
     
-    match parameter:
-        case None:
-            # 只有摸鱼时
-            try:
-                moyu_img = await get_calendar()
-            except Exception as e:
-                logger.error(e)
-                await matcher.finish(e)
-            await matcher.finish(MessageSegment.image(moyu_img))
-        case "状态":
-            push_state = scheduler.get_job(f"moyu_calendar_{event.group_id}")
-            moyu_state = "摸鱼日历状态：\n每日推送: " + ("已开启" if push_state else "已关闭")
-            if push_state:
-                group_id_info = subscribe_list[str(event.group_id)]
-                moyu_state += (
-                    f"\n推送时间: {group_id_info['hour']}:{group_id_info['minute']}"
-                )
-            await matcher.finish(moyu_state)
-            
-        case "设置" | "推送":
-            # 检查参数是否存在
-            if args[2] is None or args[3] is None:
-                await matcher.finish("参数设置错误，应为：摸鱼 (设置|推送) 时:分")
-                
-            # 参数正确时
-            calendar_subscribe(str(event.group_id), args[2], args[3])
-            await matcher.finish(f"本群摸鱼日历推送时间设置成功：{args[2]}:{args[3]}")
+@moyu_disable.handle()
+async def moyu_disable(
+    event: GroupMessageEvent, matcher: Matcher, args: Annotated[tuple[Any, ...], RegexGroup()]
+):
+    if args[1] is None:
+        # 说明是只删当前的
+        if str(event.group_id) not in subscribe_list.keys():
+            await matcher.finish("本群未开启摸鱼日历推送")
         
-        case "禁用" | "关闭":
-            
-            if args[1] is None:
-                # 说明是只删当前的
-                if str(event.group_id) not in subscribe_list.keys():
-                    await matcher.finish("本群未开启摸鱼日历推送")
-                
-                del subscribe_list[str(event.group_id)]
-                save_subscribe()
-                scheduler.remove_job(f"moyu_calendar_{event.group_id}")
-                await matcher.finish("本群摸鱼日历推送已禁用")
-                
-            if args[1] == "all" or args[1] == "ALL":
-                # 删除所有摸鱼订阅
-                for group in subscribe_list.keys():
-                    scheduler.remove_job(f"moyu_calendar_{group}")
-                subscribe_list.clear()
-                save_subscribe()
-                await matcher.finish("所有摸鱼日历推送已禁用")
+        del subscribe_list[str(event.group_id)]
+        save_subscribe()
+        scheduler.remove_job(f"moyu_calendar_{event.group_id}")
+        await matcher.finish("本群摸鱼日历推送已禁用")
+    else:
+        # 删除所有摸鱼订阅
+        for group in subscribe_list.keys():
+            scheduler.remove_job(f"moyu_calendar_{group}")
+        subscribe_list.clear()
+        save_subscribe()
+        await matcher.finish("所有摸鱼日历推送已禁用")
 
-        case "帮助":
-            await matcher.finish('''可用参数：\n1、摸鱼 状态 【查看摸鱼日历推送状态】\n2、摸鱼 (设置|推送) 时:分 【设置当前群摸鱼日历推送时间】\n3、禁用 (禁用|关闭) (all|ALL) 【禁用摸鱼日历推送，不输入all则只禁用当前群反之禁用所有群】''')
+@moyu_help.handle()
+async def moyu_help(matcher: Matcher):
+    await matcher.finish('''可用参数：\n1、摸鱼 状态 【查看摸鱼日历推送状态】\n2、摸鱼 (设置|推送) 时:分 【设置当前群摸鱼日历推送时间】\n3、禁用 (禁用|关闭) (all|ALL) 【禁用摸鱼日历推送，不输入all则只禁用当前群反之禁用所有群】''')
