@@ -6,7 +6,7 @@ from typing import Any, Annotated
 
 import httpx
 from nonebot import get_bot, get_driver, logger, on_regex, require
-from nonebot.adapters.onebot.v11 import GroupMessageEvent, MessageSegment, Event
+from nonebot.adapters.onebot.v11 import GroupMessageEvent, MessageSegment, Event, Bot
 from nonebot.matcher import Matcher
 from nonebot.params import RegexGroup
 from nonebot.plugin import PluginMetadata
@@ -97,7 +97,7 @@ def calendar_subscribe(group_id: str, hour: str, minute: str) -> None:
 
 async def is_group(event: Event) -> bool:
     '''判断是否为群聊'''
-    return event.get_type == "group"
+    return isinstance(event, GroupMessageEvent)
 
 
 moyu = on_regex("^摸鱼$", flags=I, priority=5, block=True)
@@ -139,7 +139,7 @@ async def moyu_setting(
     event: GroupMessageEvent, matcher: Matcher, args: Annotated[tuple[Any, ...], RegexGroup()]
 ):
     calendar_subscribe(str(event.group_id), args[1], args[2])
-    await matcher.finish(f"本群摸鱼日历推送时间设置成功：{args[2]}:{args[3]}")
+    await matcher.finish(f"本群摸鱼日历推送时间设置成功：{args[1]}:{args[2]}")
     
 @moyu_disable.handle()
 async def moyu_disable(
